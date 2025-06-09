@@ -3,31 +3,7 @@ import StagehandConfig from "./stagehand.config.js";
 import chalk from "chalk";
 import boxen from "boxen";
 import { AutomationParser } from "./automationParser.js";
-import * as readline from 'readline';
-
-/**
- * Creates a readline interface for user input
- */
-function createInterface() {
-  return readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
-}
-
-/**
- * Prompts the user for input
- * @param rl The readline interface
- * @param question The question to ask
- * @returns A promise that resolves with the user's answer
- */
-function askQuestion(rl: readline.Interface, question: string): Promise<string> {
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      resolve(answer);
-    });
-  });
-}
+import fs from 'fs/promises';
 
 /**
  * 🤘 Welcome to Stagehand! Thanks so much for trying us out!
@@ -44,11 +20,7 @@ function askQuestion(rl: readline.Interface, question: string): Promise<string> 
  * - https://docs.browserbase.com/
  * - https://playwright.dev/docs/intro
  */
-async function main({
-  page,
-  context,
-  stagehand,
-}: {
+async function main({ page, context, stagehand }: {
   page: Page; // Playwright Page with act, extract, and observe methods
   context: BrowserContext; // Playwright BrowserContext
   stagehand: Stagehand; // Stagehand instance
@@ -59,118 +31,58 @@ async function main({
   // Also set a longer timeout for waitForSelector
   page.setDefaultTimeout(60000); // 60 seconds timeout for all waiting operations
   
-  // Create an instance of our automation parser
-  let automationParser = new AutomationParser(page);
-  
-  // Create readline interface for user input
-  let rl = createInterface();
-  
-  console.log(chalk.blue("=== Stagehand Browser Automation System ==="));
-  console.log(chalk.yellow("Enter 'exit' or 'quit' to end the program\n"));
-  
-  // Display available commands
-  console.log(chalk.green("Available commands:"));
-  console.log("- goto [url] - Navigate to a specific URL");
-  console.log("- click [selector] - Click an element matching the selector");
-  console.log("- type [selector], [text] - Type text into an input field");
-  console.log("- waitForSelector [selector] - Wait for an element to appear");
-  console.log("- screenshot [path] - Take a screenshot of the page");
-  console.log("- extractHTML [selector] - Extract HTML content from an element");
-  console.log("- extractText [selector] - Extract text content from an element");
-  console.log("- wait [milliseconds] - Wait for a specific time");
-  console.log("- scrollIntoView [selector] - Scroll to an element");
-  console.log("- evaluate [script] - Run custom JavaScript");
-  console.log("- selectOption [selector], [value] - Select an option from a dropdown");
-  console.log("- check [selector] - Check a checkbox");
-  console.log("- uncheck [selector] - Uncheck a checkbox");
-  console.log("- hover [selector] - Hover over an element");
-  console.log("- pressKey [key] - Press a keyboard key");
-  console.log("- uploadFile [selector], [filePath] - Upload a file");
-  console.log("- waitForNavigation - Wait for page navigation to complete");
-  console.log("- getCookies - Get browser cookies");
-  console.log("- setCookies [cookies] - Set browser cookies");
-  console.log("- dragAndDrop [sourceSelector], [targetSelector] - Drag and drop elements\n");
-  
-  // Display helpful tips
-  console.log(chalk.blue("\n✨ Smart Automation Tips:"));
-  console.log("- Use 'inspectPage' to find available elements on the current page");
-  console.log("- For Google search: 'smartClick search', then 'type input[type=\"text\"], your search term'");
-  console.log("- Use 'findElement search' to find elements containing the word 'search'");
-  console.log("- Google search example: 'goto google.com', 'findElement search', 'type [found selector], your query', 'pressKey Enter'\n");
-  
-  // Interactive loop for user input
-  let running = true;
-  let browserClosed = false;
-  
-  // Add event listener for browser disconnection
-  context.on('close', () => {
-    browserClosed = true;
-    console.log(chalk.red("\n⚠️ Browser connection closed unexpectedly"));
-  });
-  
-  while (running) {
-    try {
-      // Check if browser is still open
-      if (browserClosed) {
-        console.log(chalk.yellow("Attempting to reconnect browser..."));
-        
-        // Try to reinitialize Stagehand and get a new page and context
-        try {
-          await stagehand.init();
-          page = stagehand.page;
-          context = stagehand.context;
-          
-          // Create new automation parser with the new page
-          automationParser = new AutomationParser(page);
-          browserClosed = false;
-          
-          console.log(chalk.green("✓ Browser reconnected successfully"));
-        } catch (error) {
-          console.error(chalk.red("Failed to reconnect browser:"), error);
-          running = false;
-          break;
-        }
-      }
-      
-      const instruction = await askQuestion(rl, chalk.blue("Enter instruction: "));
-      
-      // Check if user wants to exit
-      if (instruction.toLowerCase() === 'exit' || instruction.toLowerCase() === 'quit') {
-        running = false;
-        console.log(chalk.yellow("Exiting program..."));
-        break;
-      }
-      
-      // Process the instruction
-      try {
-        const result = await automationParser.processInstruction(instruction);
-        console.log(chalk.green("✓ Success:"), typeof result === 'string' ? 
-          (result.length > 150 ? result.substring(0, 150) + "..." : result) : 
-          "Action completed successfully");
-      } catch (error) {
-        if (error instanceof Error && error.message.includes("Target page, context or browser has been closed")) {
-          browserClosed = true;
-          console.log(chalk.red("⚠️ Browser has been closed. Will attempt to reconnect on next command."));
-        } else {
-          console.error(chalk.red("✗ Error:"), error instanceof Error ? error.message : String(error));
-        }
-      }
-      
-      console.log(); // Empty line for better readability
-    } catch (error) {
-      console.error(chalk.red("Unexpected error:"), error);
-      if (error instanceof Error && error.message.includes("readline was closed")) {
-        console.log(chalk.yellow("Readline interface was closed, creating a new one..."));
-        rl = createInterface();
-      }
-    }
+  const automationParser = new AutomationParser(page, context); // Pass context here
+  let instructions: string[] = [];
+
+  try {
+    const instructionsFilePath = 'instructions.txt';
+    console.log(chalk.blue(`Attempting to read instructions from: ${process.cwd()}\\${instructionsFilePath}`));
+    const instructionsFileContent = await fs.readFile(instructionsFilePath, 'utf-8');
+    instructions = instructionsFileContent
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0 && !line.startsWith('#')); // Ignore empty lines and comments
+  } catch (error) {
+    const e = error as Error;
+    console.error(chalk.red("Error reading instructions.txt:"), e.message);
+    console.log(chalk.yellow(`Please ensure 'instructions.txt' exists in the project root (c:\\Users\\Samarth Patil\\Desktop\\stagehand\\my-app).`));
+    // Exit if instructions file cannot be read, as it's the only input method now.
+    return; 
+  }
+
+  if (instructions.length === 0) {
+    console.log(chalk.yellow("No instructions found in instructions.txt or the file could not be read."));
+    console.log(chalk.blue("Example instructions.txt content:"));
+    console.log(chalk.blue("# This is a comment"));
+    console.log(chalk.blue("go to example.com"));
+    console.log(chalk.blue("screenshot example_homepage"));
+  } else {
+    console.log(chalk.green(`Found ${instructions.length} instructions. Executing...`));
   }
   
-  // Close the readline interface
-  try {
-    rl.close();
-  } catch (error) {
-    // Ignore errors when closing readline
+  const results = await automationParser.processInstructions(instructions);
+
+  console.log(chalk.bold("\n--- Automation Execution Summary ---"));
+  results.forEach(result => {
+    if (result.success) {
+      process.stdout.write(chalk.green(`✅ SUCCESS: ${result.instruction}\n`));
+      if (result.result !== undefined && result.result !== null) {
+        if (typeof result.result === 'string' || typeof result.result === 'number' || typeof result.result === 'boolean' || Array.isArray(result.result) || (typeof result.result === 'object' && Object.keys(result.result).length > 0) ) {
+             process.stdout.write(chalk.cyan(`   Output: ${JSON.stringify(result.result)}\n`));
+        }
+      }
+    } else {
+      process.stdout.write(chalk.red(`❌ FAILED:  ${result.instruction}\n`));
+      process.stdout.write(chalk.red(`   Error: ${result.error}\n`));
+    }
+  });
+  console.log(chalk.bold("--- End of Summary ---"));
+
+  // Removed interactive loop and related console logs and browser reconnection logic.
+
+  if (StagehandConfig.env === "LOCAL") {
+    console.log(chalk.magenta("\nAutomation complete. Browser will close in 10 seconds if running locally..."));
+    await page.waitForTimeout(10000);
   }
 }
 
@@ -198,7 +110,7 @@ async function run() {
           {
             title: "Browserbase",
             padding: 1,
-            margin: 3,
+            margin: 1, // Reduced margin
           },
         ),
       );
@@ -206,26 +118,30 @@ async function run() {
 
     const page = stagehand.page;
     const context = stagehand.context;
-    await main({
+    await main({ 
       page,
       context,
       stagehand,
     });
   } catch (error) {
-    console.error(chalk.red("Fatal error:"), error);
+    const e = error as Error;
+    console.error(chalk.red("Fatal error in run function:"), e);
   } finally {
     if (stagehand) {
       try {
         await stagehand.close();
       } catch (error) {
-        console.error(chalk.red("Error while closing Stagehand:"), error);
+        const e = error as Error;
+        console.error(chalk.red("Error while closing Stagehand:"), e);
       }
     }
     
     console.log(`\n🤘 Thanks for using Stagehand! Reach out on Slack with feedback: ${chalk.blue("https://stagehand.dev/slack")}\n`);
-    process.exit(0); // Ensure clean exit
+    // process.exit(0); // Consider if exit is always needed or if script should end naturally
   }
 }
+
+run();
 
 // Handle unexpected errors
 process.on('uncaughtException', (error) => {
@@ -239,3 +155,4 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 run();
+// The error logging in the summary part seems fine and should not stop execution for all instructions.

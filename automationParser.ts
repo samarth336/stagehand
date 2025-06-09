@@ -1,607 +1,305 @@
-import { Page } from "@browserbasehq/stagehand";
+import { Page, BrowserContext } from "@browserbasehq/stagehand";
 
-// Define the structure for automation actions
-interface ActionDefinition {
-  keyword: string;
-  description: string;
-  parameters: string[];
+// Interface for the function that handles a specific browser action
+interface ActionHandler {
+  (page: Page, params: string[]): Promise<any>;
 }
 
-// Define all available actions based on your JSON data
-const availableActions: ActionDefinition[] = [
-  { keyword: "goto", description: "Navigates to a specific URL", parameters: ["url"] },
-  { keyword: "click", description: "Clicks an element matching the selector", parameters: ["selector"] },
-  { keyword: "type", description: "Types text into an input field", parameters: ["selector", "text"] },
-  { keyword: "waitForSelector", description: "Waits for an element to appear", parameters: ["selector"] },
-  { keyword: "screenshot", description: "Takes a screenshot of the page", parameters: ["path"] },
-  { keyword: "extractHTML", description: "Extracts HTML content from an element", parameters: ["selector"] },
-  { keyword: "extractText", description: "Extracts text content from an element", parameters: ["selector"] },
-  { keyword: "wait", description: "Waits for a specific time", parameters: ["milliseconds"] },
-  { keyword: "scrollIntoView", description: "Scrolls to an element", parameters: ["selector"] },
-  { keyword: "evaluate", description: "Runs custom JavaScript", parameters: ["script"] },
-  { keyword: "selectOption", description: "Selects an option from a dropdown", parameters: ["selector", "value"] },
-  { keyword: "check", description: "Checks a checkbox", parameters: ["selector"] },
-  { keyword: "uncheck", description: "Unchecks a checkbox", parameters: ["selector"] },
-  { keyword: "hover", description: "Hovers over an element", parameters: ["selector"] },
-  { keyword: "pressKey", description: "Presses a keyboard key", parameters: ["key"] },
-  { keyword: "uploadFile", description: "Uploads a file", parameters: ["selector", "filePath"] },
-  { keyword: "waitForNavigation", description: "Waits for page navigation to complete", parameters: [] },
-  { keyword: "getCookies", description: "Gets browser cookies", parameters: [] },
-  { keyword: "setCookies", description: "Sets browser cookies", parameters: ["cookies"] },
-  { keyword: "dragAndDrop", description: "Drags and drops elements", parameters: ["sourceSelector", "targetSelector"] },
-  // New commands
-  { keyword: "inspectPage", description: "Shows common selectors on the current page", parameters: [] },
-  { keyword: "smartClick", description: "Clicks an element using smart selection", parameters: ["description"] },
-  { keyword: "findElement", description: "Find elements matching a text or description", parameters: ["text"] }
-];
+// Interface for defining a registered action
+interface RegisteredAction {
+  keywords: string[]; // e.g., ["go", "to"] or ["click"]
+  handler: ActionHandler;
+  paramUsage: string; // e.g. "<url>" or "<selector> <text>"
+  minParams?: number; // Minimum number of parameters after keywords
+  opensNewPage?: boolean; // Hint that this action might open a new page
+}
 
-// Class to parse and execute instructions
 export class AutomationParser {
   private page: Page;
+  private context: BrowserContext; // Store context to listen for new pages
+  private registeredActions: Map<string, RegisteredAction>;
 
-  constructor(page: Page) {
+  constructor(page: Page, context: BrowserContext) {
     this.page = page;
+    this.context = context;
+    this.registeredActions = new Map();
+    this.registerCoreActions();
+
+    // Listen for new pages and update our page reference
+    this.context.on('page', async (newPage) => {
+      console.log('New page/tab opened. Switching context to the new page.');
+      // It's important to wait for the new page to load to some extent
+      // await newPage.waitForLoadState('domcontentloaded'); // Or 'load' or 'networkidle'
+      this.page = newPage as Page; 
+      // Ensure the new page also has default timeouts set if necessary, 
+      // though Stagehand's Page object might handle this.
+      // newPage.setDefaultNavigationTimeout(60000);
+      // newPage.setDefaultTimeout(60000);
+    });
+  }
+
+  private registerCoreActions() {
+    // Go To: go to <url>
+    this.registeredActions.set("goto", {
+      keywords: ["go", "to"],
+      minParams: 1,
+      paramUsage: "<url>",
+      handler: async (page, params) => {
+        let url = params[0];
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+          url = 'https://' + url;
+        }
+        return page.goto(url);
+      }
+    });
+
+    // Click: click <selector>
+    this.registeredActions.set("click", {
+      keywords: ["click"],
+      minParams: 1,
+      paramUsage: "<selector>",
+      opensNewPage: true, // Add this hint
+      handler: async (page, params) => {
+        const selector = params[0];
+        const selectors = this.generateSmartSelectors(selector);
+        const validSelector = await this.trySelectors(selectors);
+        if (validSelector) {
+          console.log(`Clicking element with selector: ${validSelector}`);
+          // Playwright's click action itself doesn't return the new page directly
+          // The 'page' event on the context will handle new page creation.
+          return page.click(validSelector);
+        }
+        throw new Error(`Could not find element to click matching: ${selector}`);
+      }
+    });
+
+    // Type: type <selector> <text>
+    this.registeredActions.set("type", {
+      keywords: ["type"],
+      minParams: 2, // selector, text (text can be multiple words)
+      paramUsage: "<selector> <text>",
+      handler: async (page, params) => {
+        const selector = params[0];
+        const textToType = params[1]; // parseInstruction ensures this is the combined text
+        const selectors = this.generateSmartSelectors(selector);
+        const validSelector = await this.trySelectors(selectors);
+        if (validSelector) {
+          console.log(`Typing "${textToType}" into element with selector: ${validSelector}`);
+          await page.click(validSelector); // Focus the element first
+          return page.fill(validSelector, textToType);
+        }
+        throw new Error(`Could not find element to type into matching: ${selector}`);
+      }
+    });
+
+    // Wait: wait <seconds>
+    this.registeredActions.set("wait", {
+      keywords: ["wait"],
+      minParams: 1,
+      paramUsage: "<seconds>",
+      handler: async (page, params) => {
+        const seconds = parseFloat(params[0]);
+        if (isNaN(seconds) || seconds < 0) {
+          throw new Error(`Invalid wait duration: ${params[0]} seconds. Must be a non-negative number.`);
+        }
+        console.log(`Waiting for ${seconds} seconds...`);
+        return page.waitForTimeout(seconds * 1000);
+      }
+    });
+
+    // Screenshot: screenshot <filename>
+    this.registeredActions.set("screenshot", {
+      keywords: ["screenshot"],
+      minParams: 1,
+      paramUsage: "<filename>",
+      handler: async (page, params) => {
+        const filename = params[0];
+        const path = (filename.endsWith(".png") || filename.endsWith(".jpg") || filename.endsWith(".jpeg"))
+          ? filename
+          : `${filename}.png`;
+        console.log(`Taking screenshot and saving to: ${path}`);
+        return page.screenshot({ path });
+      }
+    });
+
+    // Extract Text: extract <selector>
+    this.registeredActions.set("extract", {
+      keywords: ["extract"],
+      minParams: 1,
+      paramUsage: "<selector>",
+      handler: async (page, params) => {
+        const selector = params[0];
+        const selectors = this.generateSmartSelectors(selector);
+        const validSelector = await this.trySelectors(selectors);
+        if (validSelector) {
+          const text = await page.$eval(validSelector, el => el.textContent);
+          console.log(`Extracted text from ${validSelector}: "${text ? text.trim() : ''}"`);
+          return text ? text.trim() : '';
+        }
+        throw new Error(`Could not find element to extract text from matching: ${selector}`);
+      }
+    });
   }
 
   /**
-   * Parse a natural language instruction and extract action and parameters
+   * Parses a single instruction line.
+   * Returns an object with actionKey and params, or an error object.
    */
-  private parseInstruction(instruction: string): { action: string; params: string[] } | null {
-    // Normalize instruction
-    const normalizedInstruction = instruction.trim();
-    
-    // Try to match the instruction with available actions
-    for (const action of availableActions) {
-      if (normalizedInstruction.toLowerCase().startsWith(action.keyword.toLowerCase())) {
-        // Extract parameters based on the action's expected parameters
-        const paramPart = normalizedInstruction.substring(action.keyword.length).trim();
-        
-        // Improved parameter parsing
-        if (!paramPart && action.parameters.length === 0) {
-          // Action with no parameters
-          return {
-            action: action.keyword,
-            params: []
-          };
-        }
-        
-        // Handle actions with multiple parameters
-        if (action.parameters.length > 1) {
-          // Split by commas, but handle cases where commas might be within quoted strings
-          const params = this.splitByCommaOutsideQuotes(paramPart);
-          return {
-            action: action.keyword,
-            params: params.map(p => p.trim())
-          };
-        } else {
-          // For actions with a single parameter, use the entire remaining string
-          return {
-            action: action.keyword,
-            params: [paramPart]
-          };
+  private parseInstruction(instructionLine: string): { actionKey: string; params: string[] } | { error: string } {
+    const trimmedLine = instructionLine.trim();
+    if (!trimmedLine) return { error: "Empty instruction line." };
+
+    const parts = trimmedLine.split(/\s+/);
+    const commandParts: string[] = [];
+
+    for (const [actionKey, actionDef] of this.registeredActions.entries()) {
+      if (parts.length < actionDef.keywords.length) continue;
+
+      let match = true;
+      for (let i = 0; i < actionDef.keywords.length; i++) {
+        if (parts[i].toLowerCase() !== actionDef.keywords[i]) {
+          match = false;
+          break;
         }
       }
+
+      if (match) {
+        const paramArgs = parts.slice(actionDef.keywords.length);
+
+        if (actionDef.minParams !== undefined && paramArgs.length < actionDef.minParams) {
+          return { error: `Instruction '${trimmedLine}' - insufficient parameters for '${actionDef.keywords.join(" ")}'. Expected: ${actionDef.paramUsage}` };
+        }
+
+        // Handle multi-word parameters
+        if (actionKey === "type" && paramArgs.length >= 2) { // selector + text (text can be multi-word)
+          const selector = paramArgs[0];
+          const text = paramArgs.slice(1).join(" ");
+          return { actionKey, params: [selector, text] };
+        } else if ((actionKey === "goto" || actionKey === "click" || actionKey === "screenshot" || actionKey === "extract") && paramArgs.length > 0) {
+          // These commands take one parameter which might contain spaces if not handled carefully,
+          // but typical selectors/URLs/filenames don't. If they do, they should be quoted or handled by user.
+          // For simplicity, we join all remaining parts for these single-parameter commands.
+          return { actionKey, params: [paramArgs.join(" ")] };
+        }
+        
+        return { actionKey, params: paramArgs };
+      }
     }
-    
-    return null;
+    return { error: `Unknown instruction: ${trimmedLine}` };
   }
 
-  /**
-   * Split a string by commas, but keep text within quotes together
-   */
-  private splitByCommaOutsideQuotes(input: string): string[] {
-    const result: string[] = [];
-    let current = '';
-    let inQuotes = false;
-    let quoteChar = '';
+  private async executeAction(actionKey: string, params: string[]): Promise<any> {
+    const actionDef = this.registeredActions.get(actionKey);
+    if (!actionDef) {
+      // This case should ideally be caught by parseInstruction
+      throw new Error(`Unknown action key: ${actionKey}.`);
+    }
+    return actionDef.handler(this.page, params);
+  }
 
-    for (let i = 0; i < input.length; i++) {
-      const char = input[i];
-      
-      // Handle quotes
-      if ((char === '"' || char === "'") && (i === 0 || input[i-1] !== '\\')) {
-        if (!inQuotes) {
-          inQuotes = true;
-          quoteChar = char;
-        } else if (char === quoteChar) {
-          inQuotes = false;
+  public async processInstruction(instruction: string): Promise<any> {
+    const parsed = this.parseInstruction(instruction);
+
+    if ('error' in parsed) {
+      console.error(`Parse Error: ${parsed.error} (Instruction: "${instruction}")`);
+      throw new Error(`Parse Error: ${parsed.error}`);
+    }
+    
+    console.log(`Executing: ${instruction} on page: ${this.page.url()}`);
+    const actionDef = this.registeredActions.get(parsed.actionKey);
+
+    // Execute the action
+    const result = await this.executeAction(parsed.actionKey, parsed.params);
+
+    // If an action might open a new page, Playwright's context 'page' event should handle it.
+    // We can add a small delay to allow the 'page' event to fire and update this.page
+    // if an action is known to open new tabs.
+    if (actionDef?.opensNewPage) {
+        // Check if there are multiple pages in the context
+        const pages = this.context.pages();
+        if (pages.length > 0 && pages[pages.length - 1] !== this.page) {
+            console.log(`Action '${parsed.actionKey}' may have opened a new tab. Verifying page context.`);
+            // A more robust way is to rely on the 'page' event, but as a fallback:
+            const newPageCandidate = pages[pages.length - 1];
+            // A simple check, or you could try to bring it to front and see if URL changes
+            // For now, the 'page' event listener is the primary mechanism.
+            // If this.page wasn't updated by the event yet, we might force it here, but it's tricky.
+            // await newPageCandidate.waitForLoadState('domcontentloaded').catch(() => {}); // ensure it's somewhat ready
+            // this.page = newPageCandidate;
+            // console.log('Switched to most recent page in context.');
         }
-      }
-      
-      // Split on comma only if not in quotes
-      if (char === ',' && !inQuotes) {
-        result.push(current);
-        current = '';
-      } else {
-        current += char;
-      }
+        await this.page.waitForTimeout(500); // Small delay for events to settle
     }
-    
-    // Add the last part
-    if (current) {
-      result.push(current);
-    }
-    
+
     return result;
   }
 
-  /**
-   * Generate a list of smart selectors to try for an element
-   */
-  private generateSmartSelectors(selector: string): string[] {
-    // Remove any quotes that might be present
-    const cleanSelector = selector.replace(/['"`]/g, '').trim();
-    
-    // Generate variations of the selector
-    return [
-      selector, // Original selector
-      `input[placeholder*="${cleanSelector}"]`, // Placeholder contains text
-      `input[aria-label*="${cleanSelector}"]`, // Aria label contains text
-      `input[name*="${cleanSelector}"]`, // Name attribute contains text
-      `input[id*="${cleanSelector}"]`, // ID contains text 
-      `textarea[placeholder*="${cleanSelector}"]`, // For textareas
-      `button:has-text("${cleanSelector}")`, // Button with text
-      `a:has-text("${cleanSelector}")`, // Link with text
-      `text="${cleanSelector}"`, // Text content
-      `*:has-text("${cleanSelector}")`, // Any element with text
-      `[placeholder*="${cleanSelector}"]`, // Any element with placeholder
-      `.${cleanSelector}`, // Class
-      `#${cleanSelector}`, // ID
-      `[data-test="${cleanSelector}"]`, // Common test attributes
-      `[data-testid="${cleanSelector}"]`,
-      `[data-cy="${cleanSelector}"]`,
-      `[data-qa="${cleanSelector}"]`
-    ];
-  }
-
-  /**
-   * Try multiple selectors and return the first one that matches
-   */
-  private async trySelectors(selectors: string[]): Promise<string | null> {
-    for (const selector of selectors) {
-      try {
-        // Short timeout to quickly check if selector exists
-        const element = await this.page.waitForSelector(selector, { timeout: 2000 });
-        if (element) {
-          return selector;
-        }
-      } catch (error) {
-        // Selector not found, try next one
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Execute a parsed instruction
-   */
-  private async executeAction(action: string, params: string[]): Promise<any> {
-    try {
-      switch (action) {
-        case "goto":
-          // First check if URL has http:// or https://
-          let url = params[0].trim();
-          if (!url.startsWith('http://') && !url.startsWith('https://')) {
-            url = 'https://' + url;
-          }
-          return await this.page.goto(url);
-        
-        case "click": {
-          // Try smart selectors for click
-          const selectors = this.generateSmartSelectors(params[0]);
-          const validSelector = await this.trySelectors(selectors);
-          
-          if (validSelector) {
-            console.log(`Found matching element with selector: ${validSelector}`);
-            return await this.page.click(validSelector);
-          } else {
-            throw new Error(`Could not find element matching: ${params[0]}`);
-          }
-        }
-        
-        case "type": {
-          const selectors = this.generateSmartSelectors(params[0]);
-          const validSelector = await this.trySelectors(selectors);
-          
-          if (validSelector) {
-            console.log(`Found matching input with selector: ${validSelector}`);
-            // First click on the element to focus it
-            await this.page.click(validSelector);
-            // Then fill it
-            return await this.page.fill(validSelector, params[1]);
-          } else {
-            throw new Error(`Could not find input matching: ${params[0]}`);
-          }
-        }
-        
-        case "waitForSelector": {
-          const selectors = this.generateSmartSelectors(params[0]);
-          const validSelector = await this.trySelectors(selectors);
-          
-          if (validSelector) {
-            console.log(`Found matching element with selector: ${validSelector}`);
-            return await this.page.waitForSelector(validSelector);
-          } else {
-            throw new Error(`Could not find element matching: ${params[0]}`);
-          }
-        }
-        
-        case "screenshot":
-          if (params[0] === "fullPage") {
-            return await this.page.screenshot({ fullPage: true, path: `screenshot-${Date.now()}.png` });
-          } else {
-            return await this.page.screenshot({ path: params[0] });
-          }
-        
-        case "extractHTML": {
-          const selectors = this.generateSmartSelectors(params[0]);
-          const validSelector = await this.trySelectors(selectors);
-          
-          if (validSelector) {
-            return await this.page.$eval(validSelector, el => el.outerHTML);
-          } else {
-            throw new Error(`Could not find element matching: ${params[0]}`);
-          }
-        }
-        
-        case "extractText": {
-          const selectors = this.generateSmartSelectors(params[0]);
-          const validSelector = await this.trySelectors(selectors);
-          
-          if (validSelector) {
-            return await this.page.$eval(validSelector, el => el.textContent || '');
-          } else {
-            throw new Error(`Could not find element matching: ${params[0]}`);
-          }
-        }
-        
-        case "wait":
-          return await this.page.waitForTimeout(parseInt(params[0]));
-        
-        case "scrollIntoView": {
-          const selectors = this.generateSmartSelectors(params[0]);
-          const validSelector = await this.trySelectors(selectors);
-          
-          if (validSelector) {
-            return await this.page.evaluate((selector) => {
-              const element = document.querySelector(selector);
-              if (element) element.scrollIntoView();
-            }, validSelector);
-          } else {
-            throw new Error(`Could not find element matching: ${params[0]}`);
-          }
-        }
-        
-        case "evaluate":
-          return await this.page.evaluate(params[0]);
-        
-        case "selectOption": {
-          const selectors = this.generateSmartSelectors(params[0]);
-          const validSelector = await this.trySelectors(selectors);
-          
-          if (validSelector) {
-            return await this.page.selectOption(validSelector, params[1]);
-          } else {
-            throw new Error(`Could not find select element matching: ${params[0]}`);
-          }
-        }
-        
-        case "check": {
-          const selectors = this.generateSmartSelectors(params[0]);
-          const validSelector = await this.trySelectors(selectors);
-          
-          if (validSelector) {
-            return await this.page.check(validSelector);
-          } else {
-            throw new Error(`Could not find checkbox matching: ${params[0]}`);
-          }
-        }
-        
-        case "uncheck": {
-          const selectors = this.generateSmartSelectors(params[0]);
-          const validSelector = await this.trySelectors(selectors);
-          
-          if (validSelector) {
-            return await this.page.uncheck(validSelector);
-          } else {
-            throw new Error(`Could not find checkbox matching: ${params[0]}`);
-          }
-        }
-        
-        case "hover": {
-          const selectors = this.generateSmartSelectors(params[0]);
-          const validSelector = await this.trySelectors(selectors);
-          
-          if (validSelector) {
-            return await this.page.hover(validSelector);
-          } else {
-            throw new Error(`Could not find element matching: ${params[0]}`);
-          }
-        }
-        
-        case "pressKey":
-          return await this.page.press('body', params[0]);
-        
-        case "uploadFile": {
-          const selectors = this.generateSmartSelectors(params[0]);
-          const validSelector = await this.trySelectors(selectors);
-          
-          if (validSelector) {
-            return await this.page.setInputFiles(validSelector, params[1]);
-          } else {
-            throw new Error(`Could not find file input matching: ${params[0]}`);
-          }
-        }
-        
-        case "waitForNavigation":
-          return await this.page.waitForNavigation();
-        
-        case "getCookies":
-          const context = this.page.context();
-          return await context.cookies();
-        
-        case "setCookies":
-          const cookieContext = this.page.context();
-          return await cookieContext.addCookies(JSON.parse(params[0]));
-        
-        case "dragAndDrop": {
-          const sourceSelectors = this.generateSmartSelectors(params[0]);
-          const targetSelectors = this.generateSmartSelectors(params[1]);
-          
-          const validSourceSelector = await this.trySelectors(sourceSelectors);
-          const validTargetSelector = await this.trySelectors(targetSelectors);
-          
-          if (validSourceSelector && validTargetSelector) {
-            const sourceElement = await this.page.$(validSourceSelector);
-            const targetElement = await this.page.$(validTargetSelector);
-            
-            if (sourceElement && targetElement) {
-              const sourceBound = await sourceElement.boundingBox();
-              const targetBound = await targetElement.boundingBox();
-              
-              if (sourceBound && targetBound) {
-                await this.page.mouse.move(
-                  sourceBound.x + sourceBound.width / 2,
-                  sourceBound.y + sourceBound.height / 2
-                );
-                await this.page.mouse.down();
-                await this.page.mouse.move(
-                  targetBound.x + targetBound.width / 2,
-                  targetBound.y + targetBound.height / 2
-                );
-                await this.page.mouse.up();
-              }
-            }
-          } else {
-            throw new Error(`Could not find elements for drag and drop`);
-          }
-          return;
-        }
-        
-        case "inspectPage": {
-          // Find common interactive elements on the page
-          const result = await this.page.evaluate(() => {
-            const elements: {type: string, selector: string, text?: string}[] = [];
-            
-            // Find search inputs
-            document.querySelectorAll('input[type="search"], input[placeholder*="search" i], input[name*="search" i], input[id*="search" i]').forEach((el) => {
-              const input = el as HTMLInputElement;
-              elements.push({
-                type: 'Search input',
-                selector: getUniqueSelector(input),
-                text: input.placeholder || input.name || input.id
-              });
-            });
-            
-            // Find text inputs
-            document.querySelectorAll('input[type="text"]:not([hidden])').forEach((el) => {
-              const input = el as HTMLInputElement;
-              elements.push({
-                type: 'Text input',
-                selector: getUniqueSelector(input),
-                text: input.placeholder || input.name || input.id
-              });
-            });
-            
-            // Find buttons
-            document.querySelectorAll('button:not([hidden]), [role="button"]:not([hidden])').forEach((el) => {
-              elements.push({
-                type: 'Button',
-                selector: getUniqueSelector(el),
-                text: (el as HTMLElement).innerText.trim().substring(0, 30)
-              });
-            });
-            
-            // Find links
-            document.querySelectorAll('a:not([hidden])').forEach((el) => {
-              if ((el as HTMLElement).innerText.trim()) {
-                elements.push({
-                  type: 'Link',
-                  selector: getUniqueSelector(el),
-                  text: (el as HTMLElement).innerText.trim().substring(0, 30)
-                });
-              }
-            });
-            
-            // Helper function to get a unique selector for an element
-            function getUniqueSelector(el: Element): string {
-              // Try ID
-              if (el.id) return `#${el.id}`;
-              
-              // Try name attribute
-              if (el instanceof HTMLInputElement && el.name) return `input[name="${el.name}"]`;
-              
-              // Try data attributes
-              for (const attr of ['data-testid', 'data-test', 'data-cy', 'data-qa']) {
-                const value = el.getAttribute(attr);
-                if (value) return `[${attr}="${value}"]`;
-              }
-              
-              // Try classes with tagname
-              if (el.classList.length > 0) {
-                return `${el.tagName.toLowerCase()}.${Array.from(el.classList).join('.')}`;
-              }
-              
-              // Fallback: get a path
-              let path = '';
-              let current = el;
-              while (current && current !== document.body) {
-                let selector = current.tagName.toLowerCase();
-                if (current.id) {
-                  selector += `#${current.id}`;
-                  path = selector + (path ? ' > ' + path : '');
-                  break;
-                } else {
-                  const parent = current.parentElement;
-                  if (!parent) break;
-                  
-                  const siblings = Array.from(parent.children).filter(s => s.tagName === current.tagName);
-                  if (siblings.length > 1) {
-                    const index = siblings.indexOf(current as Element);
-                    selector += `:nth-child(${index + 1})`;
-                  }
-                }
-                path = selector + (path ? ' > ' + path : '');
-                current = current.parentElement!;
-              }
-              
-              return path;
-            }
-            
-            return elements.slice(0, 15); // Limit to 15 elements to avoid overwhelming
-          });
-          
-          return result;
-        }
-        
-        case "findElement": {
-          const textToFind = params[0].toLowerCase();
-          const results = await this.page.evaluate((searchText) => {
-            const matches: { element: string, text: string, selector: string }[] = [];
-            
-            // Function to get visible text
-            function getVisibleText(element: Element): string {
-              return (element as HTMLElement).innerText || element.textContent || '';
-            }
-            
-            // Function to check if element is visible
-            function isVisible(element: Element): boolean {
-              const style = window.getComputedStyle(element);
-              return style.display !== 'none' && 
-                     style.visibility !== 'hidden' && 
-                     Number(style.opacity) > 0 &&
-                     (element as HTMLElement).offsetWidth > 0 &&
-                     (element as HTMLElement).offsetHeight > 0;
-            }
-            
-            // Function to create a selector
-            function getSelector(el: Element): string {
-              if (el.id) return `#${el.id}`;
-              
-              if (el instanceof HTMLInputElement && el.name) {
-                return `input[name="${el.name}"]`;
-              }
-              
-              if (el.hasAttribute('data-testid')) {
-                return `[data-testid="${el.getAttribute('data-testid')}"]`;
-              }
-              
-              // Get a simple path
-              let path = el.tagName.toLowerCase();
-              if (el.classList.length > 0) {
-                path += `.${Array.from(el.classList).join('.')}`;
-              }
-              return path;
-            }
-            
-            // Find elements that contain the search text
-            document.querySelectorAll('*').forEach((element) => {
-              if (!isVisible(element)) return;
-              
-              const text = getVisibleText(element).trim().toLowerCase();
-              const placeholder = element.getAttribute('placeholder')?.toLowerCase();
-              const ariaLabel = element.getAttribute('aria-label')?.toLowerCase();
-              const name = element.getAttribute('name')?.toLowerCase();
-              const title = element.getAttribute('title')?.toLowerCase();
-              
-              if ((text && text.includes(searchText)) || 
-                  (placeholder && placeholder.includes(searchText)) ||
-                  (ariaLabel && ariaLabel.includes(searchText)) ||
-                  (name && name.includes(searchText)) ||
-                  (title && title.includes(searchText))) {
-                
-                matches.push({
-                  element: element.tagName.toLowerCase(),
-                  text: text || placeholder || ariaLabel || name || title || '',
-                  selector: getSelector(element)
-                });
-              }
-            });
-            
-            return matches.slice(0, 10); // Return top 10 matches
-          }, textToFind);
-          
-          return results;
-        }
-        
-        case "smartClick": {
-          const description = params[0].toLowerCase();
-          
-          // First try to find the element
-          const results = await this.executeAction("findElement", [description]);
-          
-          if (results && results.length > 0) {
-            // Click the first matching element
-            const selector = results[0].selector;
-            console.log(`Smart clicking element: ${selector} with text: ${results[0].text}`);
-            return await this.page.click(selector);
-          } else {
-            throw new Error(`Could not find any element matching description: ${description}`);
-          }
-        }
-        
-        default:
-          throw new Error(`Unknown action: ${action}`);
-      }
-    } catch (error) {
-      throw error;
-    }
-  }
-
-  /**
-   * Process a natural language instruction
-   */
-  public async processInstruction(instruction: string): Promise<any> {
-    const parsedInstruction = this.parseInstruction(instruction);
-    
-    if (!parsedInstruction) {
-      throw new Error(`Could not parse instruction: ${instruction}`);
-    }
-    
-    console.log(`Executing action: ${parsedInstruction.action} with params: ${parsedInstruction.params.join(', ')}`);
-    
-    return await this.executeAction(parsedInstruction.action, parsedInstruction.params);
-  }
-
-  /**
-   * Process multiple instructions in sequence
-   */
   public async processInstructions(instructions: string[]): Promise<any[]> {
     const results = [];
-    
     for (const instruction of instructions) {
+      if (!instruction || instruction.startsWith("#")) { // Skip empty lines or comments
+        continue;
+      }
       try {
+        // Ensure 'this.page' is the most current page before processing instruction
+        // This is particularly important if a previous instruction opened a new tab.
+        const currentPages = this.context.pages();
+        if (currentPages.length > 0 && this.page !== currentPages[currentPages.length -1]) {
+            // This check might be redundant if the 'page' event listener is working perfectly
+            // but can serve as a safeguard.
+            // console.log("Context has multiple pages. Ensuring parser is on the latest page.");
+            // this.page = currentPages[currentPages.length - 1];
+        }
         const result = await this.processInstruction(instruction);
         results.push({ instruction, result, success: true });
       } catch (error) {
-        results.push({ 
-          instruction, 
-          error: error instanceof Error ? error.message : String(error),
-          success: false 
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        // Log which page URL the error occurred on for better debugging
+        let pageUrl = 'unknown';
+        try {
+          pageUrl = this.page.url();
+        } catch (e) { /* page might be closed */ }
+        console.error(`Error executing instruction "${instruction}" on page ${pageUrl}: ${errorMessage}`);
+        results.push({
+          instruction,
+          error: errorMessage,
+          success: false
         });
       }
     }
-    
     return results;
+  }
+
+  // --- Helper methods for smart selectors (can be kept from original) ---
+  private generateSmartSelectors(selector: string): string[] {
+    const cleanSelector = selector.replace(/['"`]/g, '').trim();
+    return [
+      selector, // Original selector
+      `input[placeholder*="${cleanSelector}"]`, `textarea[placeholder*="${cleanSelector}"]`, `[placeholder*="${cleanSelector}"]`,
+      `input[aria-label*="${cleanSelector}"]`, `[aria-label*="${cleanSelector}"]`,
+      `input[name*="${cleanSelector}"]`, `[name*="${cleanSelector}"]`,
+      `input[id*="${cleanSelector}"]`, `[id*="${cleanSelector}"]`, `#${cleanSelector}`,
+      `button:has-text("${cleanSelector}")`, `a:has-text("${cleanSelector}")`,
+      `text="${cleanSelector}"`, `*:has-text("${cleanSelector}")`,
+      `.${cleanSelector}`, // Class
+      `[data-testid="${cleanSelector}"]`, `[data-test="${cleanSelector}"]`,
+      `[data-cy="${cleanSelector}"]`, `[data-qa="${cleanSelector}"]`
+    ];
+  }
+
+  private async trySelectors(selectors: string[]): Promise<string | null> {
+    for (const selector of selectors) {
+      try {
+        const element = await this.page.waitForSelector(selector, { timeout: 1000, state: "attached" }); // Quick check
+        if (element) {
+          // Check for visibility if possible, though waitForSelector with 'visible' state can be slow for trying many.
+          // For now, 'attached' is a good first pass. The action itself (click, type) will fail if not interactable.
+          return selector;
+        }
+      } catch (error) {
+        // Selector not found or not attached, try next one
+      }
+    }
+    return null;
   }
 }

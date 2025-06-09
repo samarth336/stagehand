@@ -4,6 +4,8 @@ import chalk from "chalk";
 import boxen from "boxen";
 import { AutomationParser } from "./automationParser.js";
 import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 /**
  * 🤘 Welcome to Stagehand! Thanks so much for trying us out!
@@ -20,6 +22,11 @@ import fs from 'fs/promises';
  * - https://docs.browserbase.com/
  * - https://playwright.dev/docs/intro
  */
+
+// Get the directory name in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 async function main({ page, context, stagehand }: {
   page: Page; // Playwright Page with act, extract, and observe methods
   context: BrowserContext; // Playwright BrowserContext
@@ -63,19 +70,26 @@ async function main({ page, context, stagehand }: {
   const results = await automationParser.processInstructions(instructions);
 
   console.log(chalk.bold("\n--- Automation Execution Summary ---"));
-  results.forEach(result => {
+  for (const result of results) {
     if (result.success) {
       process.stdout.write(chalk.green(`✅ SUCCESS: ${result.instruction}\n`));
       if (result.result !== undefined && result.result !== null) {
         if (typeof result.result === 'string' || typeof result.result === 'number' || typeof result.result === 'boolean' || Array.isArray(result.result) || (typeof result.result === 'object' && Object.keys(result.result).length > 0) ) {
-             process.stdout.write(chalk.cyan(`   Output: ${JSON.stringify(result.result)}\n`));
+          // If this is the HTML content from extractHTML command
+          if (result.instruction.toLowerCase().startsWith('extracthtml')) {
+            const outputPath = path.join(__dirname, 'wikipedia_content.html');
+            await fs.writeFile(outputPath, result.result);
+            console.log(chalk.cyan(`   HTML content saved to: ${outputPath}`));
+          } else {
+            process.stdout.write(chalk.cyan(`   Output: ${JSON.stringify(result.result)}\n`));
+          }
         }
       }
     } else {
       process.stdout.write(chalk.red(`❌ FAILED:  ${result.instruction}\n`));
       process.stdout.write(chalk.red(`   Error: ${result.error}\n`));
     }
-  });
+  }
   console.log(chalk.bold("--- End of Summary ---"));
 
   // Removed interactive loop and related console logs and browser reconnection logic.

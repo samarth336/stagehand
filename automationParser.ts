@@ -76,17 +76,24 @@ export class AutomationParser {
     // Type: type <selector> <text>
     this.registeredActions.set("type", {
       keywords: ["type"],
-      minParams: 2, // selector, text (text can be multiple words)
+      minParams: 2,
       paramUsage: "<selector> <text>",
       handler: async (page, params) => {
         const selector = params[0];
-        const textToType = params[1]; // parseInstruction ensures this is the combined text
+        const textToType = params[1];
         const selectors = this.generateSmartSelectors(selector);
         const validSelector = await this.trySelectors(selectors);
         if (validSelector) {
           console.log(`Typing "${textToType}" into element with selector: ${validSelector}`);
-          await page.click(validSelector); // Focus the element first
-          return page.fill(validSelector, textToType);
+          // Wait for the element to be visible
+          await page.waitForSelector(validSelector, { state: 'visible' });
+          // Clear the input first
+          await page.fill(validSelector, '');
+          // Type the text
+          await page.type(validSelector, textToType);
+          // Press Enter after typing
+          await page.keyboard.press('Enter');
+          return true;
         }
         throw new Error(`Could not find element to type into matching: ${selector}`);
       }
@@ -139,6 +146,61 @@ export class AutomationParser {
         throw new Error(`Could not find element to extract text from matching: ${selector}`);
       }
     });
+
+    // Find Element: find element <selector>
+    this.registeredActions.set("findelement", {
+      keywords: ["find", "element"],
+      minParams: 1,
+      paramUsage: "<selector>",
+      handler: async (page, params) => {
+        const selector = params[0];
+        const selectors = this.generateSmartSelectors(selector);
+        const validSelector = await this.trySelectors(selectors);
+        if (validSelector) {
+          console.log(`Found element with selector: ${validSelector}`);
+          // Wait for the element to be visible and clickable
+          await page.waitForSelector(validSelector, { state: 'visible' });
+          // Click the element to focus it
+          await page.click(validSelector);
+          return true;
+        }
+        throw new Error(`Could not find element matching: ${selector}`);
+      }
+    });
+
+    // Press Key: pressKey <key>
+    this.registeredActions.set("presskey", {
+      keywords: ["pressKey"],
+      minParams: 1,
+      paramUsage: "<key>",
+      handler: async (page, params) => {
+        const key = params[0];
+        console.log(`Pressing key: ${key}`);
+        return page.keyboard.press(key);
+      }
+    });
+
+    // Extract HTML: extractHTML <selector>
+    this.registeredActions.set("extracthtml", {
+      keywords: ["extractHTML"],
+      minParams: 1,
+      paramUsage: "<selector>",
+      handler: async (page, params) => {
+        const selector = params[0];
+        const selectors = this.generateSmartSelectors(selector);
+        const validSelector = await this.trySelectors(selectors);
+        if (validSelector) {
+          console.log(`Extracting HTML from ${validSelector}`);
+          // Wait for the element to be visible
+          await page.waitForSelector(validSelector, { state: 'visible' });
+          // Get the HTML content
+          const html = await page.$eval(validSelector, el => el.innerHTML);
+          console.log(`Successfully extracted HTML content`);
+          return html;
+        }
+        throw new Error(`Could not find element to extract HTML from matching: ${selector}`);
+      }
+    });
   }
 
   /**
@@ -148,6 +210,18 @@ export class AutomationParser {
   private parseInstruction(instructionLine: string): { actionKey: string; params: string[] } | { error: string } {
     const trimmedLine = instructionLine.trim();
     if (!trimmedLine) return { error: "Empty instruction line." };
+
+    // Special handling for pressKey command
+    if (trimmedLine.toLowerCase().startsWith('presskey')) {
+      const key = trimmedLine.split(/\s+/).slice(1).join(' ');
+      return { actionKey: 'presskey', params: [key] };
+    }
+
+    // Special handling for extractHTML command
+    if (trimmedLine.toLowerCase().startsWith('extracthtml')) {
+      const selector = trimmedLine.split(/\s+/).slice(1).join(' ');
+      return { actionKey: 'extracthtml', params: [selector] };
+    }
 
     const parts = trimmedLine.split(/\s+/);
     const commandParts: string[] = [];
@@ -170,15 +244,14 @@ export class AutomationParser {
           return { error: `Instruction '${trimmedLine}' - insufficient parameters for '${actionDef.keywords.join(" ")}'. Expected: ${actionDef.paramUsage}` };
         }
 
-        // Handle multi-word parameters
-        if (actionKey === "type" && paramArgs.length >= 2) { // selector + text (text can be multi-word)
-          const selector = paramArgs[0];
-          const text = paramArgs.slice(1).join(" ");
+        // Handle multi-word parameters and special cases
+        if (actionKey === "type") {
+          // Handle type command with comma-separated selector and text
+          const fullParam = paramArgs.join(" ");
+          const [selector, ...textParts] = fullParam.split(",").map(s => s.trim());
+          const text = textParts.join(",").trim();
           return { actionKey, params: [selector, text] };
-        } else if ((actionKey === "goto" || actionKey === "click" || actionKey === "screenshot" || actionKey === "extract") && paramArgs.length > 0) {
-          // These commands take one parameter which might contain spaces if not handled carefully,
-          // but typical selectors/URLs/filenames don't. If they do, they should be quoted or handled by user.
-          // For simplicity, we join all remaining parts for these single-parameter commands.
+        } else if ((actionKey === "goto" || actionKey === "click" || actionKey === "screenshot" || actionKey === "extract" || actionKey === "findelement") && paramArgs.length > 0) {
           return { actionKey, params: [paramArgs.join(" ")] };
         }
         

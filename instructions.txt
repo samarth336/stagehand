@@ -1,18 +1,2 @@
-# Wikipedia Search and Extract HTML Example
-# This automation will search for "India" on Wikipedia and extract HTML content
-
-# Navigate to Wikipedia
-go to wikipedia.org
-
-# Find and use the search box
-find element search
-type input[name="search"], India
-wait 1
-pressKey Enter
-
-# Wait for page to load
-wait 3
-
-# Find main content area and extract HTML
-find element content
-extractHTML #content
+go to github.com
+sign in user@example.com password123 myusername India

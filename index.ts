@@ -168,5 +168,4 @@ process.on('unhandledRejection', (reason, promise) => {
   process.exit(1);
 });
 
-run();
 // The error logging in the summary part seems fine and should not stop execution for all instructions.

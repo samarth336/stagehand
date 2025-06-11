@@ -24,17 +24,12 @@ export class AutomationParser {
     this.context = context;
     this.registeredActions = new Map();
     this.registerCoreActions();
+    this.registerAuthActions(); // Add authentication actions
 
     // Listen for new pages and update our page reference
     this.context.on('page', async (newPage) => {
       console.log('New page/tab opened. Switching context to the new page.');
-      // It's important to wait for the new page to load to some extent
-      // await newPage.waitForLoadState('domcontentloaded'); // Or 'load' or 'networkidle'
       this.page = newPage as Page; 
-      // Ensure the new page also has default timeouts set if necessary, 
-      // though Stagehand's Page object might handle this.
-      // newPage.setDefaultNavigationTimeout(60000);
-      // newPage.setDefaultTimeout(60000);
     });
   }
 
@@ -203,6 +198,533 @@ export class AutomationParser {
     });
   }
 
+  // New method to register authentication-related actions
+  private registerAuthActions() {
+    // Login action with multiple keywords
+    this.registeredActions.set("login", {
+      keywords: ["login", "sign in", "signin", "log in"],
+      minParams: 2,
+      paramUsage: "<username> <password> [selector-prefix]",
+      handler: async (page, params) => {
+        const username = params[0];
+        const password = params[1];
+        const selectorPrefix = params.length > 2 ? params[2] : "";
+        
+        console.log(`Attempting to login with username: ${username}`);
+        
+        // Step 1: Check if we're already on a login page
+        const isLoginFormPresent = await this.isLoginFormPresent(page);
+        
+        // Step 2: If not, try to find and click a login link
+        if (!isLoginFormPresent) {
+          console.log("Login form not detected on current page. Looking for login link...");
+          
+          const navigatedToLoginPage = await this.detectAndNavigateToLoginPage(page);
+          
+          if (!navigatedToLoginPage) {
+            // Step 3: If no login link, try direct navigation based on common URL patterns
+            const urlWithoutParams = page.url().split('?')[0];
+            const baseUrl = urlWithoutParams.endsWith('/') ? urlWithoutParams.slice(0, -1) : urlWithoutParams;
+            
+            console.log("No login link found, trying common login URLs...");
+            
+            // Common login URL patterns
+            const loginPaths = ['/login', '/signin', '/auth/login', '/user/login', '/account/login'];
+            
+            for (const loginPath of loginPaths) {
+              try {
+                console.log(`Trying direct navigation to ${baseUrl}${loginPath}`);
+                await page.goto(`${baseUrl}${loginPath}`);
+                
+                // Check if we found a login form
+                if (await this.isLoginFormPresent(page)) {
+                  console.log(`Successfully found login form at ${page.url()}`);
+                  break;
+                }
+              } catch (e) {
+                console.log(`Failed to navigate to ${baseUrl}${loginPath}: ${e}`);
+              }
+            }
+          }
+        } else {
+          console.log("Login form already present on current page.");
+        }
+        
+        // Step 4: Handle the login process
+        return this.handleAuthentication(page, username, password, "login", selectorPrefix);
+      }
+    });
+
+    // Sign Up / Registration action
+    this.registeredActions.set("signup", {
+      keywords: ["signup", "sign up", "register", "create account"],
+      minParams: 2,
+      paramUsage: "<email> <password> [username] [country]",
+      handler: async (page, params) => {
+        const email = params[0];
+        const password = params[1];
+        const username = params.length > 2 ? params[2] : email.split('@')[0];
+        const country = params.length > 3 ? params[3] : "India";
+        
+        console.log(`Attempting to sign up with email: ${email}, username: ${username}, country: ${country}`);
+        
+        if (page.url().includes('github.com')) {
+          console.log("Navigating to GitHub signup page...");
+          await page.goto('https://github.com/signup');
+          await page.waitForLoadState('networkidle');
+
+          // Wait for the signup form
+          console.log("Waiting for signup form...");
+          await page.waitForSelector('form[action*="signup"]', { state: 'visible', timeout: 30000 });
+
+          // Fill Email
+          console.log("Filling email...");
+          await page.waitForSelector('input#email', { state: 'visible', timeout: 10000 });
+          await page.fill('input#email', email);
+
+          // Fill Password
+          console.log("Filling password...");
+          await page.waitForSelector('input#password', { state: 'visible', timeout: 10000 });
+          await page.fill('input#password', password);
+
+          // Fill Username
+          console.log("Filling username...");
+          await page.waitForSelector('input#login', { state: 'visible', timeout: 10000 });
+          await page.fill('input#login', username);
+
+          // Select Country
+          console.log("Selecting country...");
+          await page.waitForSelector('select#country', { state: 'visible', timeout: 10000 });
+          await page.selectOption('select#country', { label: country });
+
+          // Email preferences (optional, check if exists)
+          const emailPrefSelector = 'input[name="opt_in"]';
+          const emailPrefExists = await page.$(emailPrefSelector);
+          if (emailPrefExists) {
+            console.log("Setting email preferences checkbox...");
+            const checked = await page.isChecked(emailPrefSelector);
+            if (!checked) {
+              await page.click(emailPrefSelector);
+            }
+          }
+
+          // Click Continue
+          console.log("Clicking Continue button...");
+          await page.waitForSelector('button[type="submit"]', { state: 'visible', timeout: 10000 });
+          await page.click('button[type="submit"]');
+
+          // Wait for navigation or next step
+          try {
+            await page.waitForNavigation({ timeout: 20000 });
+            console.log("Signup form submitted and navigation occurred.");
+          } catch (e) {
+            console.log("No navigation after signup form submission, may be on next step.");
+          }
+
+          return true;
+        }
+        // fallback for other sites
+        return this.handleAuthentication(page, email, password, "signup", "", username, email);
+      }
+    });
+
+    // Auto-detect authentication type
+    this.registeredActions.set("authenticate", {
+      keywords: ["authenticate", "auth"],
+      minParams: 2,
+      paramUsage: "<username> <password> [fullname]",
+      handler: async (page, params) => {
+        const username = params[0];
+        const password = params[1];
+        const fullname = params.length > 2 ? params[2] : username;
+        
+        console.log(`Auto-detecting authentication type for username: ${username}`);
+        const authType = await this.detectAuthenticationType(page);
+        return this.handleAuthentication(page, username, password, authType, "", fullname);
+      }
+    });
+  }
+
+  // Helper method to detect authentication type
+  private async detectAuthenticationType(page: Page): Promise<string> {
+    console.log("Analyzing page to detect authentication type...");
+    
+    // Look for signup-specific keywords
+    const signupKeywords = ["sign up", "register", "create account", "join now", "get started"];
+    const loginKeywords = ["sign in", "login", "log in", "member login", "sign on"];
+    
+    // Get page text content
+    const pageContent = await page.evaluate(() => document.body.textContent?.toLowerCase() || "");
+    
+    // Check for presence of form elements
+    const hasNameField = await page.$('input[name*="name" i]:not([type="email"]):not([type="password"])').then(Boolean);
+    const hasConfirmPasswordField = await page.$('input[name*="confirm" i][type="password"]').then(Boolean);
+    
+    // Count matches for signup vs login keywords
+    let signupMatches = 0;
+    let loginMatches = 0;
+    
+    for (const keyword of signupKeywords) {
+      if (pageContent.includes(keyword.toLowerCase())) signupMatches++;
+    }
+    
+    for (const keyword of loginKeywords) {
+      if (pageContent.includes(keyword.toLowerCase())) loginMatches++;
+    }
+    
+    console.log(`Auth detection results: signup indicators=${signupMatches + (hasNameField ? 1 : 0) + (hasConfirmPasswordField ? 1 : 0)}, login indicators=${loginMatches}`);
+    
+    // Determine auth type based on indicators
+    if ((signupMatches > loginMatches) || hasNameField || hasConfirmPasswordField) {
+      console.log("Detected signup/registration form");
+      return "signup";
+    } else {
+      console.log("Detected login/signin form");
+      return "login";
+    }
+  }
+
+  // Main method to handle authentication
+  private async handleAuthentication(
+    page: Page, 
+    username: string, 
+    password: string, 
+    authType: string,
+    selectorPrefix: string = "",
+    fullname: string = "",
+    email: string = ""
+  ): Promise<boolean> {
+    console.log(`Handling ${authType} with username: ${username}`);
+    
+    try {
+      // Site-specific handling based on URL
+      const url = page.url().toLowerCase();
+      
+      // GitHub specific handling
+      if (url.includes('github.com')) {
+        console.log("Using GitHub-specific authentication flow");
+        
+        try {
+          // Wait for GitHub's login form fields
+          await page.waitForSelector('input#login_field', { state: 'visible', timeout: 5000 });
+          await page.waitForSelector('input#password', { state: 'visible', timeout: 5000 });
+          await page.waitForSelector('input[type="submit"][name="commit"]', { state: 'visible', timeout: 5000 });
+          
+          // Fill in credentials and submit
+          await page.fill('input#login_field', username);
+          await page.fill('input#password', password);
+          await page.click('input[type="submit"][name="commit"]');
+          
+          // Wait for navigation after login
+          await page.waitForNavigation({ timeout: 10000 }).catch(() => {
+            console.log("No navigation occurred after GitHub login submission");
+          });
+          
+          return true;
+        } catch (githubError) {
+          console.error(`GitHub-specific login failed: ${githubError}`);
+          throw new Error(`GitHub login failed: ${githubError}`);
+        }
+      }
+      
+      // Google specific handling
+      if (url.includes('google.com') || url.includes('accounts.google')) {
+        console.log("Using Google-specific authentication flow");
+        
+        try {
+          // Google login is a multi-step process
+          // Step 1: Email/Username
+          await page.waitForSelector('input[type="email"]', { state: 'visible', timeout: 5000 });
+          await page.fill('input[type="email"]', username);
+          
+          // Find and click next button
+          const nextButton = await this.trySelectors([
+            'button:has-text("Next")', 
+            'div[id="identifierNext"]', 
+            'input[type="submit"]'
+          ]);
+          
+          if (!nextButton) {
+            throw new Error("Could not find Next button on Google login page");
+          }
+          
+          await page.click(nextButton);
+          
+          // Wait for password field to appear (with a longer timeout)
+          await page.waitForTimeout(2000); // Google often has animations
+          await page.waitForSelector('input[type="password"]', { state: 'visible', timeout: 10000 });
+          
+          // Step 2: Password
+          await page.fill('input[type="password"]', password);
+          
+          // Find and click the password submit button
+          const passwordNextButton = await this.trySelectors([
+            'button:has-text("Next")', 
+            'div[id="passwordNext"]', 
+            'input[type="submit"]'
+          ]);
+          
+          if (!passwordNextButton) {
+            throw new Error("Could not find submit button after entering password");
+          }
+          
+          await page.click(passwordNextButton);
+          
+          // Wait for navigation
+          await page.waitForNavigation({ timeout: 15000 }).catch(() => {
+            console.log("No navigation occurred after Google login submission");
+          });
+          
+          return true;
+        } catch (googleError) {
+          console.error(`Google-specific login failed: ${googleError}`);
+          // Fall through to generic method as backup
+        }
+      }
+      
+      // Generic handling for other sites
+      console.log("Using generic authentication flow");
+      
+      // Find and fill username field
+      const usernameSelectors = this.generateAuthFieldSelectors('username', selectorPrefix);
+      const usernameSelector = await this.trySelectors(usernameSelectors);
+      
+      if (!usernameSelector) {
+        throw new Error("Could not find username/email field");
+      }
+      
+      console.log(`Found username field with selector: ${usernameSelector}`);
+      await page.waitForSelector(usernameSelector, { state: 'visible', timeout: 5000 });
+      await page.fill(usernameSelector, username);
+      
+      // Handle full name field for signup
+      if (authType === "signup" && fullname) {
+        const nameSelectors = this.generateAuthFieldSelectors('name', selectorPrefix);
+        const nameSelector = await this.trySelectors(nameSelectors);
+        
+        if (nameSelector) {
+          console.log(`Found name field with selector: ${nameSelector}`);
+          await page.waitForSelector(nameSelector, { state: 'visible' });
+          await page.fill(nameSelector, fullname);
+        }
+      }
+      
+      // Find and fill password field
+      const passwordSelectors = this.generateAuthFieldSelectors('password', selectorPrefix);
+      const passwordSelector = await this.trySelectors(passwordSelectors);
+      
+      if (!passwordSelector) {
+        throw new Error("Could not find password field");
+      }
+      
+      console.log(`Found password field with selector: ${passwordSelector}`);
+      await page.waitForSelector(passwordSelector, { state: 'visible' });
+      await page.fill(passwordSelector, password);
+      
+      // Handle confirm password field for signup
+      if (authType === "signup") {
+        const confirmPasswordSelectors = this.generateAuthFieldSelectors('confirm-password', selectorPrefix);
+        const confirmPasswordSelector = await this.trySelectors(confirmPasswordSelectors);
+        
+        if (confirmPasswordSelector) {
+          console.log(`Found confirm password field with selector: ${confirmPasswordSelector}`);
+          await page.waitForSelector(confirmPasswordSelector, { state: 'visible' });
+          await page.fill(confirmPasswordSelector, password);
+        }
+      }
+      
+      // Find and click the submit button
+      const buttonSelectors = this.generateAuthButtonSelectors(authType, selectorPrefix);
+      const buttonSelector = await this.trySelectors(buttonSelectors);
+      
+      if (!buttonSelector) {
+        throw new Error(`Could not find ${authType} button`);
+      }
+      
+      console.log(`Found ${authType} button with selector: ${buttonSelector}`);
+      await page.waitForSelector(buttonSelector, { state: 'visible' });
+      await page.click(buttonSelector);
+      
+      // Wait for navigation or page change
+      try {
+        await page.waitForNavigation({ timeout: 8000 }).catch(() => {
+          console.log("No navigation occurred after form submission");
+        });
+      } catch (e) {
+        console.log("Navigation timeout - assuming form was submitted");
+      }
+      
+      return true;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`Authentication error: ${errorMessage}`);
+      throw new Error(`Failed to ${authType}: ${errorMessage}`);
+    }
+  }
+
+  // Improved selectors for authentication fields
+  private generateAuthFieldSelectors(fieldType: string, selectorPrefix: string = ""): string[] {
+    const selectors: string[] = [];
+    const prefix = selectorPrefix ? `${selectorPrefix} ` : "";
+    
+    switch (fieldType) {
+      case 'username':
+        selectors.push(
+          // Site-specific selectors
+          `${prefix}input[id="login_field"]`, // GitHub
+          `${prefix}input[name="login"]`, // GitHub
+          `${prefix}input[id="username"]`,
+          `${prefix}input[id="email"]`,
+          
+          // Type-based selectors (most reliable)
+          `${prefix}input[type="email"]:not([aria-hidden="true"]):not([hidden])`,
+          
+          // Name-based selectors
+          `${prefix}input[name="email"]:not([type="hidden"]):not([type="checkbox"])`,
+          `${prefix}input[name="username"]:not([type="hidden"]):not([type="checkbox"])`,
+          `${prefix}input[name="user"]:not([type="hidden"]):not([type="checkbox"])`,
+          `${prefix}input[name*="mail" i]:not([type="hidden"]):not([type="checkbox"])`,
+          `${prefix}input[name*="user" i]:not([type="hidden"]):not([type="checkbox"])`,
+          `${prefix}input[name*="login" i]:not([type="hidden"]):not([type="checkbox"])`,
+          
+          // ID-based selectors with better filtering
+          `${prefix}input[id*="email" i]:not([type="hidden"]):not([type="checkbox"]):not([id*="confirm" i]):not([id*="keep" i]):not([id*="remember" i]):not([id*="include" i])`,
+          `${prefix}input[id*="user" i]:not([type="hidden"]):not([type="checkbox"])`,
+          `${prefix}input[id*="login" i]:not([type="hidden"]):not([type="checkbox"])`,
+          
+          // Placeholder-based selectors
+          `${prefix}input[placeholder*="email" i]:not([type="hidden"])`,
+          `${prefix}input[placeholder*="username" i]:not([type="hidden"])`,
+          `${prefix}input[placeholder*="user" i]:not([type="hidden"])`,
+          
+          // Label-based selectors
+          `${prefix}input[aria-label*="email" i]:not([type="checkbox"])`,
+          `${prefix}input[aria-label*="username" i]:not([type="checkbox"])`,
+          `${prefix}input[aria-label*="user" i]:not([type="checkbox"])`,
+          
+          // Class-based selectors
+          `${prefix}input.username`,
+          `${prefix}input.email`,
+          `${prefix}input.login`,
+          
+          // Fallback to common patterns
+          `${prefix}input.form-control:not([type="password"]):not([type="checkbox"]):not([type="hidden"])`
+        );
+        break;
+        
+      case 'password':
+        selectors.push(
+          // Site-specific selectors
+          `${prefix}input[id="password"]`, // Common on many sites
+          
+          // Type-based selectors (most reliable)
+          `${prefix}input[type="password"]`,
+          
+          // Other attribute selectors
+          `${prefix}input[name="password"]`,
+          `${prefix}input[name*="password" i]`,
+          `${prefix}input[id*="password" i]:not([id*="confirm" i]):not([id*="verify" i])`,
+          `${prefix}input[placeholder*="password" i]:not([placeholder*="confirm" i])`,
+          `${prefix}input[aria-label*="password" i]:not([aria-label*="confirm" i])`,
+          `${prefix}input.password`
+        );
+        break;
+        
+      case 'confirm-password':
+        selectors.push(
+          `${prefix}input[type="password"][name*="confirm" i]`,
+          `${prefix}input[type="password"][id*="confirm" i]`,
+          `${prefix}input[type="password"][placeholder*="confirm" i]`,
+          `${prefix}input[type="password"][aria-label*="confirm" i]`,
+          `${prefix}input[type="password"][name*="verify" i]`,
+          `${prefix}input[type="password"][id*="verify" i]`,
+          `${prefix}input[type="password"][name*="retype" i]`,
+          `${prefix}input[type="password"][id*="retype" i]`,
+          `${prefix}input[type="password"]:nth-of-type(2)`
+        );
+        break;
+        
+      case 'name':
+        selectors.push(
+          `${prefix}input[name*="fullname" i]`,
+          `${prefix}input[name*="full_name" i]`,
+          `${prefix}input[name="name"]`,
+          `${prefix}input[id*="fullname" i]`,
+          `${prefix}input[id*="full_name" i]`,
+          `${prefix}input[id="name"]`,
+          `${prefix}input[name*="first" i][name*="name" i]`,
+          `${prefix}input[id*="first" i][id*="name" i]`,
+          `${prefix}input[placeholder*="name" i]:not([placeholder*="user" i]):not([placeholder*="email" i])`
+        );
+        break;
+    }
+    
+    return selectors;
+  }
+
+  // Generate selectors for authentication buttons
+  private generateAuthButtonSelectors(authType: string, selectorPrefix: string = ""): string[] {
+    const selectors: string[] = [];
+    const prefix = selectorPrefix ? `${selectorPrefix} ` : "";
+    
+    if (authType === "login" || authType === "signin") {
+      selectors.push(
+        `${prefix}button[type="submit"]`,
+        `${prefix}input[type="submit"]`,
+        `${prefix}button[id*="login" i]`,
+        `${prefix}button[id*="signin" i]`,
+        `${prefix}button[class*="login" i]`,
+        `${prefix}button[class*="signin" i]`,
+        `${prefix}button:has-text("Log In")`,
+        `${prefix}button:has-text("Sign In")`,
+        `${prefix}button:has-text("Login")`,
+        `${prefix}button:has-text("Signin")`,
+        `${prefix}input[value*="Log In" i]`,
+        `${prefix}input[value*="Sign In" i]`,
+        `${prefix}input[value*="Login" i]`,
+        `${prefix}a[href*="login" i]`,
+        `${prefix}a[href*="signin" i]`,
+        `${prefix}a:has-text("Log In")`,
+        `${prefix}a:has-text("Sign In")`,
+        `${prefix}.login-button`,
+        `${prefix}.signin-button`,
+        `${prefix}form[id*="login" i] button`,
+        `${prefix}form[id*="signin" i] button`,
+        `${prefix}form[class*="login" i] button`,
+        `${prefix}form[class*="signin" i] button`
+      );
+    } else { // signup/register
+      selectors.push(
+        `${prefix}button[type="submit"]`,
+        `${prefix}input[type="submit"]`,
+        `${prefix}button[id*="signup" i]`,
+        `${prefix}button[id*="register" i]`,
+        `${prefix}button[id*="create" i]`,
+        `${prefix}button[class*="signup" i]`,
+        `${prefix}button[class*="register" i]`,
+        `${prefix}button:has-text("Sign Up")`,
+        `${prefix}button:has-text("Register")`,
+        `${prefix}button:has-text("Create Account")`,
+        `${prefix}button:has-text("Join")`,
+        `${prefix}input[value*="Sign Up" i]`,
+        `${prefix}input[value*="Register" i]`,
+        `${prefix}input[value*="Create" i]`,
+        `${prefix}a[href*="signup" i]`,
+        `${prefix}a[href*="register" i]`,
+        `${prefix}a:has-text("Sign Up")`,
+        `${prefix}a:has-text("Register")`,
+        `${prefix}.signup-button`,
+        `${prefix}.register-button`,
+        `${prefix}form[id*="signup" i] button`,
+        `${prefix}form[id*="register" i] button`,
+        `${prefix}form[class*="signup" i] button`,
+        `${prefix}form[class*="register" i] button`
+      );
+    }
+    
+    return selectors;
+  }
+
   /**
    * Parses a single instruction line.
    * Returns an object with actionKey and params, or an error object.
@@ -211,54 +733,44 @@ export class AutomationParser {
     const trimmedLine = instructionLine.trim();
     if (!trimmedLine) return { error: "Empty instruction line." };
 
-    // Special handling for pressKey command
-    if (trimmedLine.toLowerCase().startsWith('presskey')) {
-      const key = trimmedLine.split(/\s+/).slice(1).join(' ');
-      return { actionKey: 'presskey', params: [key] };
+    // Handle comment lines starting with "For" (treat as comments)
+    if (trimmedLine.toLowerCase().startsWith('for ')) {
+      console.log(`Treating line as a comment: "${trimmedLine}"`);
+      return { actionKey: "skip", params: [] };
     }
 
-    // Special handling for extractHTML command
-    if (trimmedLine.toLowerCase().startsWith('extracthtml')) {
-      const selector = trimmedLine.split(/\s+/).slice(1).join(' ');
-      return { actionKey: 'extracthtml', params: [selector] };
+    // Special handling for "go to" command
+    if (trimmedLine.toLowerCase().startsWith('go to ')) {
+      const url = trimmedLine.substring(6).trim();
+      return { actionKey: "goto", params: [url] };
     }
 
+    // Special handling for "sign in" command
+    if (trimmedLine.toLowerCase().startsWith('sign in ')) {
+      const parts = trimmedLine.split(/\s+/);
+      if (parts.length < 4) {
+        return { error: `Insufficient parameters for sign in. Expected: sign in <username> <password> [selector-prefix]` };
+      }
+      return { actionKey: "login", params: parts.slice(2) };
+    }
+
+    // Rest of the parsing logic
     const parts = trimmedLine.split(/\s+/);
-    const commandParts: string[] = [];
+    const actionKey = parts[0].toLowerCase();
+    const params = parts.slice(1);
 
-    for (const [actionKey, actionDef] of this.registeredActions.entries()) {
-      if (parts.length < actionDef.keywords.length) continue;
-
-      let match = true;
-      for (let i = 0; i < actionDef.keywords.length; i++) {
-        if (parts[i].toLowerCase() !== actionDef.keywords[i]) {
-          match = false;
-          break;
-        }
-      }
-
-      if (match) {
-        const paramArgs = parts.slice(actionDef.keywords.length);
-
-        if (actionDef.minParams !== undefined && paramArgs.length < actionDef.minParams) {
-          return { error: `Instruction '${trimmedLine}' - insufficient parameters for '${actionDef.keywords.join(" ")}'. Expected: ${actionDef.paramUsage}` };
-        }
-
-        // Handle multi-word parameters and special cases
-        if (actionKey === "type") {
-          // Handle type command with comma-separated selector and text
-          const fullParam = paramArgs.join(" ");
-          const [selector, ...textParts] = fullParam.split(",").map(s => s.trim());
-          const text = textParts.join(",").trim();
-          return { actionKey, params: [selector, text] };
-        } else if ((actionKey === "goto" || actionKey === "click" || actionKey === "screenshot" || actionKey === "extract" || actionKey === "findelement") && paramArgs.length > 0) {
-          return { actionKey, params: [paramArgs.join(" ")] };
-        }
-        
-        return { actionKey, params: paramArgs };
-      }
+    // Check if the action is registered
+    const registeredAction = this.registeredActions.get(actionKey);
+    if (!registeredAction) {
+      return { error: `Unknown action key: ${actionKey}.` };
     }
-    return { error: `Unknown instruction: ${trimmedLine}` };
+
+    // Validate minimum parameters
+    if (registeredAction.minParams && params.length < registeredAction.minParams) {
+      return { error: `Insufficient parameters for ${actionKey}. Expected: ${registeredAction.paramUsage}` };
+    }
+
+    return { actionKey, params };
   }
 
   private async executeAction(actionKey: string, params: string[]): Promise<any> {
@@ -309,37 +821,37 @@ export class AutomationParser {
 
   public async processInstructions(instructions: string[]): Promise<any[]> {
     const results = [];
+    
     for (const instruction of instructions) {
-      if (!instruction || instruction.startsWith("#")) { // Skip empty lines or comments
-        continue;
-      }
       try {
-        // Ensure 'this.page' is the most current page before processing instruction
-        // This is particularly important if a previous instruction opened a new tab.
-        const currentPages = this.context.pages();
-        if (currentPages.length > 0 && this.page !== currentPages[currentPages.length -1]) {
-            // This check might be redundant if the 'page' event listener is working perfectly
-            // but can serve as a safeguard.
-            // console.log("Context has multiple pages. Ensuring parser is on the latest page.");
-            // this.page = currentPages[currentPages.length - 1];
+        const parsed = this.parseInstruction(instruction);
+        
+        // Skip comments and empty lines
+        if (!('error' in parsed) && parsed.actionKey === 'skip') {
+          console.log(`Skipping comment line: "${instruction}"`);
+          results.push({ 
+            instruction, 
+            result: "Skipped comment line", 
+            success: true 
+          });
+          continue;
         }
+
+        // Ensure we're on the most current page
+        const currentPages = this.context.pages();
+        if (currentPages.length > 0 && this.page !== currentPages[currentPages.length - 1]) {
+          this.page = currentPages[currentPages.length - 1] as Page;
+        }
+
         const result = await this.processInstruction(instruction);
         results.push({ instruction, result, success: true });
-      } catch (error) {
+      } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        // Log which page URL the error occurred on for better debugging
-        let pageUrl = 'unknown';
-        try {
-          pageUrl = this.page.url();
-        } catch (e) { /* page might be closed */ }
-        console.error(`Error executing instruction "${instruction}" on page ${pageUrl}: ${errorMessage}`);
-        results.push({
-          instruction,
-          error: errorMessage,
-          success: false
-        });
+        console.error(`Error executing instruction "${instruction}" on page ${this.page.url()}:`, errorMessage);
+        results.push({ instruction, error: errorMessage, success: false });
       }
     }
+
     return results;
   }
 
@@ -360,19 +872,237 @@ export class AutomationParser {
     ];
   }
 
+  // Enhanced trySelectors method that properly checks visibility
   private async trySelectors(selectors: string[]): Promise<string | null> {
     for (const selector of selectors) {
       try {
-        const element = await this.page.waitForSelector(selector, { timeout: 1000, state: "attached" }); // Quick check
-        if (element) {
-          // Check for visibility if possible, though waitForSelector with 'visible' state can be slow for trying many.
-          // For now, 'attached' is a good first pass. The action itself (click, type) will fail if not interactable.
+        // First check if the selector exists in the DOM
+        const element = await this.page.$(selector);
+        if (!element) continue;
+        
+        // Then check if it's visible by examining offsetParent (more reliable than isVisible)
+        // This catches elements that are in the DOM but hidden via CSS
+        const isVisible = await element.evaluate(el => {
+          // Check if element is visible in viewport
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return false;
+          
+          // Check if element has offsetParent (not hidden by display:none)
+          if (!el.offsetParent && el.offsetParent !== document.body) return false;
+          
+          // Check computed style
+          const style = window.getComputedStyle(el);
+          if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
+          
+          return true;
+        }).catch(() => false);
+        
+        if (isVisible) {
           return selector;
+        } else {
+          console.log(`Selector ${selector} found but element is not visible.`);
         }
       } catch (error) {
-        // Selector not found or not attached, try next one
+        // Continue to next selector
       }
     }
     return null;
+  }
+
+  // Add this new method to detect and navigate to login page
+  private async detectAndNavigateToLoginPage(page: Page): Promise<boolean> {
+    console.log("Analyzing page to find login/signup links...");
+    
+    // Site-specific handling for common websites
+    const url = page.url().toLowerCase();
+    
+    // GitHub specific handling
+    if (url.includes('github.com')) {
+      console.log("Detected GitHub - using specific navigation pattern");
+      try {
+        // GitHub has a "Sign in" link in the header or a "Sign in" button
+        // Try the button first (newer UI)
+        const signInButton = await page.$('a.HeaderMenu-link[href="/login"]');
+        if (signInButton && await signInButton.isVisible()) {
+          console.log("Found GitHub sign-in header link");
+          await signInButton.click();
+          await page.waitForNavigation({ timeout: 5000 }).catch(() => {});
+          return true;
+        }
+        
+        // Try the older UI "Sign in" link
+        const altSignIn = await page.$('a:has-text("Sign in")');
+        if (altSignIn && await altSignIn.isVisible()) {
+          console.log("Found GitHub sign-in text link");
+          await altSignIn.click();
+          await page.waitForNavigation({ timeout: 5000 }).catch(() => {});
+          return true;
+        }
+        
+        // Direct navigation if links aren't found
+        console.log("No GitHub login links found, navigating directly to /login");
+        await page.goto('https://github.com/login');
+        return true;
+      } catch (error) {
+        console.error("Error navigating to GitHub login:", error);
+      }
+    }
+    
+    // Common selectors for login/signin links - ordered by specificity
+    const loginLinkSelectors = [
+      // Primary navigation links
+      'header a[href*="login" i]',
+      'header a[href*="signin" i]',
+      'nav a[href*="login" i]',
+      'nav a[href*="signin" i]',
+      
+      // Text-based selectors with context
+      '.header a:has-text("Sign in")',
+      '.nav a:has-text("Sign in")',
+      '.menu a:has-text("Sign in")',
+      'header a:has-text("Log in")',
+      'nav a:has-text("Log in")',
+      
+      // Button selectors
+      'button:has-text("Sign in")',
+      'button:has-text("Log in")',
+      'button:has-text("Login")',
+      'button.login',
+      'button.signin',
+      
+      // General link selectors
+      'a.login-link',
+      'a.signin-link',
+      'a#login-link',
+      'a#signin-link',
+      
+      // Less specific text selectors
+      'a:has-text("Sign in")',
+      'a:has-text("Log in")',
+      'a:has-text("Login")',
+      
+      // href based selectors
+      'a[href*="login"]',
+      'a[href*="signin"]',
+      'a[href*="auth"]',
+      
+      // Fallbacks with icons or labels
+      'a[aria-label*="login" i]',
+      'a[aria-label*="sign in" i]',
+      'a[title*="login" i]',
+      'a[title*="sign in" i]'
+    ];
+    
+    try {
+      // Try each selector in order
+      for (const selector of loginLinkSelectors) {
+        const elements = await page.$$(selector);
+        
+        // Try each matching element
+        for (const element of elements) {
+          if (await element.isVisible()) {
+            console.log(`Found login link with selector: ${selector}`);
+            
+            // Check if it's likely to be a login link by examining text or attributes
+            const elementText = await element.textContent() || '';
+            const href = await element.getAttribute('href') || '';
+            const ariaLabel = await element.getAttribute('aria-label') || '';
+            const title = await element.getAttribute('title') || '';
+            
+            // Skip elements that are likely to be signup links
+            const signupKeywords = ['sign up', 'register', 'create account', 'join'];
+            const textToCheck = (elementText + ' ' + href + ' ' + ariaLabel + ' ' + title).toLowerCase();
+            if (signupKeywords.some(keyword => textToCheck.includes(keyword))) {
+              console.log(`Skipping element that appears to be a signup link: "${elementText.trim()}"`);
+              continue;
+            }
+            
+            // Click the element to navigate to login page
+            await element.click();
+            
+            // Wait for navigation to complete
+            try {
+              await page.waitForNavigation({ timeout: 5000 }).catch(() => {
+                console.log("No navigation occurred after clicking login link");
+              });
+            } catch (e) {
+              console.log("Navigation timeout - checking if login form appeared");
+            }
+            
+            // Verify we're on a login page now
+            if (await this.isLoginFormPresent(page)) {
+              console.log("Successfully navigated to login page");
+              return true;
+            }
+            
+            console.log("Clicked element did not lead to login form, trying next element");
+          }
+        }
+      }
+      
+      console.log("Could not find a suitable login link on the page");
+      return false;
+    } catch (error) {
+      console.error("Error while detecting login link:", error);
+      return false;
+    }
+  }
+
+  // Helper method to check if login form is present on page
+  private async isLoginFormPresent(page: Page): Promise<boolean> {
+    try {
+      // Check for common login form selectors
+      const loginFormSelectors = [
+        'form[action*="login"]',
+        'form[action*="signin"]',
+        'form[action*="auth"]',
+        'form:has(input[type="password"])',
+        'form:has(input[name*="password" i])',
+        'form:has(input[name*="login" i])',
+        'form:has(input[name*="user" i])'
+      ];
+
+      for (const selector of loginFormSelectors) {
+        const form = await page.$(selector);
+        if (form) {
+          // Check if the form is visible
+          const isVisible = await page.evaluate((el) => {
+            if (el instanceof HTMLElement) {
+              return el.offsetParent !== null;
+            }
+            return false;
+          }, form);
+
+          if (isVisible) {
+            // Additional checks to confirm it's likely a login form
+            const hasPasswordField = selector.includes('password') || 
+              await page.$eval('input[type="password"]', el => {
+                if (el instanceof HTMLElement) {
+                  return el.offsetParent !== null;
+                }
+                return false;
+              }).catch(() => false);
+              
+            const hasSubmitButton = await page.$eval('button[type="submit"], input[type="submit"]', 
+              el => {
+                if (el instanceof HTMLElement) {
+                  return el.offsetParent !== null;
+                }
+                return false;
+              }).catch(() => false);
+              
+            if (hasPasswordField && hasSubmitButton) {
+              console.log(`Found login form with selector: ${selector}`);
+              return true;
+            }
+          }
+        }
+      }
+
+      return false;
+    } catch (error) {
+      console.error('Error checking for login form:', error);
+      return false;
+    }
   }
 }

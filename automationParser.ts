@@ -754,6 +754,15 @@ export class AutomationParser {
       return { actionKey: "login", params: parts.slice(2) };
     }
 
+    // Special handling for "sign up" command
+    if (trimmedLine.toLowerCase().startsWith('sign up ')) {
+      const parts = trimmedLine.split(/\s+/);
+      if (parts.length < 4) {
+        return { error: `Insufficient parameters for sign up. Expected: sign up <email> <password> [username] [country]` };
+      }
+      return { actionKey: "signup", params: parts.slice(2) };
+    }
+
     // Rest of the parsing logic
     const parts = trimmedLine.split(/\s+/);
     const actionKey = parts[0].toLowerCase();
@@ -888,7 +897,12 @@ export class AutomationParser {
           if (rect.width === 0 || rect.height === 0) return false;
           
           // Check if element has offsetParent (not hidden by display:none)
-          if (!el.offsetParent && el.offsetParent !== document.body) return false;
+          if (el instanceof HTMLElement) {
+            if (!el.offsetParent && el.offsetParent !== document.body) return false;
+          } else {
+            // For SVGElement or others, fallback to bounding rect check only
+            return rect.width !== 0 && rect.height !== 0;
+          }
           
           // Check computed style
           const style = window.getComputedStyle(el);

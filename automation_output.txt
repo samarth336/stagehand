@@ -1,0 +1,69 @@
+INFO: Attempting to read instructions from: C:\Users\Samarth Patil\Desktop\new stage hand\stagehand\instructions.txt
+INFO: Found 2 instructions. Executing...
+INFO: 
+=== Automation Execution Summary ===
+✅ SUCCESS: go to github.com
+   Output: {"_type":"Response","_guid":"response@ecfda08860fd42658414a248f5a30e84"}
+✅ SUCCESS: sign in user@example.com password123
+   Output: true
+=== End of Summary ===
+
+INFO: 
+Automation complete. Browser will close in 10 seconds if running locally...
+INFO: 
+🤘 Thanks for using Stagehand! Reach out on Slack with feedback: [34mhttps://stagehand.dev/slack[39m
+
+INFO: Attempting to read instructions from: C:\Users\Samarth Patil\Desktop\new stage hand\stagehand\instructions.txt
+INFO: Found 2 instructions. Executing...
+INFO: 
+=== Automation Execution Summary ===
+✅ SUCCESS: go to github.com
+   Output: {"_type":"Response","_guid":"response@6141892443a2f63095a6d5495f316a8e"}
+❌ FAILED:  sign up user@example.com password123 username India
+   Error: page.waitForSelector: Timeout 10000ms exceeded.
+Call log:
+[2m  - waiting for locator('select#country') to be visible[22m
+
+=== End of Summary ===
+
+INFO: 
+Automation complete. Browser will close in 10 seconds if running locally...
+INFO: 
+🤘 Thanks for using Stagehand! Reach out on Slack with feedback: [34mhttps://stagehand.dev/slack[39m
+
+INFO: Attempting to read instructions from: C:\Users\Samarth Patil\Desktop\new stage hand\stagehand\instructions.txt
+INFO: Found 2 instructions. Executing...
+INFO: 
+=== Automation Execution Summary ===
+✅ SUCCESS: go to github.com
+   Output: {"_type":"Response","_guid":"response@4cc7e3874e67e43c5bfe449071fedb13"}
+❌ FAILED:  sign up user@example.com password123 username India
+   Error: page.waitForSelector: Target page, context or browser has been closed
+Call log:
+[2m  - waiting for locator('select#country') to be visible[22m
+
+=== End of Summary ===
+
+INFO: 
+Automation complete. Browser will close in 10 seconds if running locally...
+ERROR: Fatal error in run function: {}
+ERROR: Error while closing Stagehand: {}
+INFO: 
+🤘 Thanks for using Stagehand! Reach out on Slack with feedback: [34mhttps://stagehand.dev/slack[39m
+
+INFO: Attempting to read instructions from: C:\Users\Samarth Patil\Desktop\new stage hand\stagehand\instructions.txt
+INFO: Found 2 instructions. Executing...
+INFO: 
+=== Automation Execution Summary ===
+✅ SUCCESS: go to github.com
+   Output: {"_type":"Response","_guid":"response@7033f437c01a1567cb933c84cc4fa60b"}
+✅ SUCCESS: sign in user@example.com password123
+   Output: true
+=== End of Summary ===
+
+INFO: 
+Automation complete. Browser will close in 10 seconds if running locally...
+ERROR: Fatal error in run function: {}
+INFO: 
+🤘 Thanks for using Stagehand! Reach out on Slack with feedback: [34mhttps://stagehand.dev/slack[39m
+

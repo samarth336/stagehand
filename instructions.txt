@@ -1,2 +1,2 @@
 go to github.com
-sign in user@example.com password123 myusername India
+sign in user@example.com password123

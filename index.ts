@@ -27,6 +27,58 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Create a custom console logger that writes to both console and file
+class ConsoleLogger {
+  private outputBuffer: string[] = [];
+  private outputFile: string;
+
+  constructor(outputFile: string = 'automation_output.txt') {
+    this.outputFile = path.join(__dirname, outputFile);
+  }
+
+  private async writeToFile(message: string) {
+    try {
+      await fs.appendFile(this.outputFile, message + '\n');
+    } catch (error) {
+      console.error(chalk.red("Error writing to output file:"), error);
+    }
+  }
+
+  log(...args: any[]) {
+    const message = args.map(arg => 
+      typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+    ).join(' ');
+    console.log(...args);
+    this.outputBuffer.push(message);
+    this.writeToFile(message);
+  }
+
+  error(...args: any[]) {
+    const message = args.map(arg => 
+      typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+    ).join(' ');
+    console.error(...args);
+    this.outputBuffer.push(`ERROR: ${message}`);
+    this.writeToFile(`ERROR: ${message}`);
+  }
+
+  info(...args: any[]) {
+    const message = args.map(arg => 
+      typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+    ).join(' ');
+    console.info(...args);
+    this.outputBuffer.push(`INFO: ${message}`);
+    this.writeToFile(`INFO: ${message}`);
+  }
+
+  getOutput() {
+    return this.outputBuffer.join('\n');
+  }
+}
+
+// Create a global logger instance
+const logger = new ConsoleLogger();
+
 async function main({ page, context, stagehand }: {
   page: Page; // Playwright Page with act, extract, and observe methods
   context: BrowserContext; // Playwright BrowserContext
@@ -43,7 +95,7 @@ async function main({ page, context, stagehand }: {
 
   try {
     const instructionsFilePath = 'instructions.txt';
-    console.log(chalk.blue(`Attempting to read instructions from: ${process.cwd()}\\${instructionsFilePath}`));
+    logger.info(`Attempting to read instructions from: ${process.cwd()}\\${instructionsFilePath}`);
     const instructionsFileContent = await fs.readFile(instructionsFilePath, 'utf-8');
     instructions = instructionsFileContent
       .split('\n')
@@ -51,51 +103,52 @@ async function main({ page, context, stagehand }: {
       .filter(line => line.length > 0 && !line.startsWith('#')); // Ignore empty lines and comments
   } catch (error) {
     const e = error as Error;
-    console.error(chalk.red("Error reading instructions.txt:"), e.message);
-    console.log(chalk.yellow(`Please ensure 'instructions.txt' exists in the project root (c:\\Users\\Samarth Patil\\Desktop\\stagehand\\my-app).`));
+    logger.error("Error reading instructions.txt:", e.message);
+    logger.info(`Please ensure 'instructions.txt' exists in the project root (c:\\Users\\Samarth Patil\\Desktop\\stagehand\\my-app).`);
     // Exit if instructions file cannot be read, as it's the only input method now.
     return; 
   }
 
   if (instructions.length === 0) {
-    console.log(chalk.yellow("No instructions found in instructions.txt or the file could not be read."));
-    console.log(chalk.blue("Example instructions.txt content:"));
-    console.log(chalk.blue("# This is a comment"));
-    console.log(chalk.blue("go to example.com"));
-    console.log(chalk.blue("screenshot example_homepage"));
+    logger.info("No instructions found in instructions.txt or the file could not be read.");
+    logger.info("Example instructions.txt content:");
+    logger.info("# This is a comment");
+    logger.info("go to example.com");
+    logger.info("screenshot example_homepage");
   } else {
-    console.log(chalk.green(`Found ${instructions.length} instructions. Executing...`));
+    logger.info(`Found ${instructions.length} instructions. Executing...`);
   }
   
   const results = await automationParser.processInstructions(instructions);
 
-  console.log(chalk.bold("\n--- Automation Execution Summary ---"));
+  // Create a formatted output string
+  let outputString = "\n=== Automation Execution Summary ===\n";
   for (const result of results) {
     if (result.success) {
-      process.stdout.write(chalk.green(`✅ SUCCESS: ${result.instruction}\n`));
+      outputString += `✅ SUCCESS: ${result.instruction}\n`;
       if (result.result !== undefined && result.result !== null) {
         if (typeof result.result === 'string' || typeof result.result === 'number' || typeof result.result === 'boolean' || Array.isArray(result.result) || (typeof result.result === 'object' && Object.keys(result.result).length > 0) ) {
           // If this is the HTML content from extractHTML command
           if (result.instruction.toLowerCase().startsWith('extracthtml')) {
             const outputPath = path.join(__dirname, 'wikipedia_content.html');
             await fs.writeFile(outputPath, result.result);
-            console.log(chalk.cyan(`   HTML content saved to: ${outputPath}`));
+            outputString += `   HTML content saved to: ${outputPath}\n`;
           } else {
-            process.stdout.write(chalk.cyan(`   Output: ${JSON.stringify(result.result)}\n`));
+            outputString += `   Output: ${JSON.stringify(result.result)}\n`;
           }
         }
       }
     } else {
-      process.stdout.write(chalk.red(`❌ FAILED:  ${result.instruction}\n`));
-      process.stdout.write(chalk.red(`   Error: ${result.error}\n`));
+      outputString += `❌ FAILED:  ${result.instruction}\n`;
+      outputString += `   Error: ${result.error}\n`;
     }
   }
-  console.log(chalk.bold("--- End of Summary ---"));
+  outputString += "=== End of Summary ===\n";
 
-  // Removed interactive loop and related console logs and browser reconnection logic.
+  logger.info(outputString);
 
   if (StagehandConfig.env === "LOCAL") {
-    console.log(chalk.magenta("\nAutomation complete. Browser will close in 10 seconds if running locally..."));
+    logger.info("\nAutomation complete. Browser will close in 10 seconds if running locally...");
     await page.waitForTimeout(10000);
   }
 }
@@ -116,7 +169,7 @@ async function run() {
     await stagehand.init();
 
     if (StagehandConfig.env === "BROWSERBASE" && stagehand.browserbaseSessionID) {
-      console.log(
+      logger.info(
         boxen(
           `View this session live in your browser: \n${chalk.blue(
             `https://browserbase.com/sessions/${stagehand.browserbaseSessionID}`,
@@ -139,18 +192,18 @@ async function run() {
     });
   } catch (error) {
     const e = error as Error;
-    console.error(chalk.red("Fatal error in run function:"), e);
+    logger.error("Fatal error in run function:", e);
   } finally {
     if (stagehand) {
       try {
         await stagehand.close();
       } catch (error) {
         const e = error as Error;
-        console.error(chalk.red("Error while closing Stagehand:"), e);
+        logger.error("Error while closing Stagehand:", e);
       }
     }
     
-    console.log(`\n🤘 Thanks for using Stagehand! Reach out on Slack with feedback: ${chalk.blue("https://stagehand.dev/slack")}\n`);
+    logger.info(`\n🤘 Thanks for using Stagehand! Reach out on Slack with feedback: ${chalk.blue("https://stagehand.dev/slack")}\n`);
     // process.exit(0); // Consider if exit is always needed or if script should end naturally
   }
 }
@@ -159,12 +212,12 @@ run();
 
 // Handle unexpected errors
 process.on('uncaughtException', (error) => {
-  console.error(chalk.red('Uncaught exception:'), error);
+  logger.error('Uncaught exception:', error);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error(chalk.red('Unhandled rejection at:'), promise, chalk.red('reason:'), reason);
+  logger.error('Unhandled rejection at:', promise, 'reason:', reason);
   process.exit(1);
 });
 
